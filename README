@@ -1,0 +1,28 @@
+Tcl crontime package
+=======================================
+
+Parse and evaluate times from crontab-like time specifier strings.
+
+
+Requirements
+=======================================
+
+Tcl 8.5 or higher
+
+
+Synopsis
+=======================================
+
+package require crontime 0.1
+
+set bool [crontime now "* * * * *"]
+
+set bool [crontime valid "* * * * This,Will,Fail"]
+
+set alist [crontime extract "30 08 * * *"]
+
+set ntime [crontime next "30 08 * * Tue-Thu"]
+
+set ltime [crontab last "30 08 * * Tue-Thu"]
+
+
