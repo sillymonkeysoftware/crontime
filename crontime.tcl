@@ -18,7 +18,7 @@ namespace eval ::crontime {
                             [dict create 60 0] \
                             [dict create 24 0] \
                             {} \
-                            {} \
+                            [dict create 0 1] \ \
                             [dict create 7 0] ]
     
     variable alphamap [list \
@@ -64,6 +64,35 @@ proc ::crontime::valid {cron} {
 }
 
 
+# expand()
+#   Expand a cron time entry into lists of possible numbers
+#
+#   This function is mostly used internally by this package, but
+#   may prove useful for debugging other things too.
+#
+#   PARAMETERS
+#       a crontab time string
+#
+#   RETURNS 
+#       Success: a list of 5 number-lists { {} {} {} {} {} }
+#       Failure: an empty list {}
+#
+#**************************************
+proc ::crontime::expand {cron} {
+    
+    set atoms {}
+    set segments [regexp -inline -all -- {\S+} $cron]
+    
+    # iterate over each segment, and expand into lists of numbers.
+    for {set index 0} {$index < [llength $segments]} {incr index} {
+        set tmp [::crontime::_expand_cron_index [lindex $segments $index] $index]
+        lappend atoms $tmp
+    }
+    
+    return $atoms    
+}
+
+
 # now()
 #   Check if a crontab string is valid for the current time
 #
@@ -80,9 +109,9 @@ proc ::crontime::now {cron args} {
     variable formatmap
     
     if {$args != ""} {
-        set tstamp [lindex $args 0]
+        set stamp [lindex $args 0]
     } else {
-        set tstamp [clock seconds]    
+        set stamp [clock seconds]    
     }
     
     set atoms [::crontime::expand $cron]
@@ -92,70 +121,414 @@ proc ::crontime::now {cron args} {
         set found 0
         
         # extract our value from clock format, and convert to INT number
-        set val [expr [clock format $tstamp -format [dict get $formatmap $key]]]
+        set fmt [dict get $formatmap $key]
+        set val [expr [clock format $stamp -format $fmt]]
         
         if {[regexp "\\y$val\\y" [lindex $atoms $key]]} {
             set found 1
-            if {$key == 2} {
-                set mday 1
-            }    
+            if {$key == 2} { set mday 1 }    
         }
         
-        if {$key == 2 && ! $found && [llength [lindex $atoms 4]] < 7} {
-            # For some complex cases(like, "30 08 1 10 Tue"), a cron is valid
-            # in TWO situations:
-            #  - 08:30am on October 1st.
-            #  - 08:30am on EVERY Tuesday in October.
-            # So, do not be too hasty to abort if the MDAY field doesn't match,
-            # because WDAY needs to be given opportunity to match in some cases  
+        # For some complex cases(like, "30 08 1 10 Tue"), a cron is valid
+        # in TWO situations:
+        #  - 08:30am on October 1st.
+        #  - 08:30am on EVERY Tuesday in October.
+        # So, do not be too hasty to abort if the MDAY field doesn't match,
+        # because WDAY needs to be given opportunity to match in some cases 
+        if {$key == 2 && ! $found && [llength [lindex $atoms 4]] < 7} { 
             continue       
         }
         
         if {$key == 4} {
-            if {$found} {
-                return 1
-            }
-            if {! $found && $mday} {
-                return 1
-            }
+            if {$found} { return 1 }
+            if {! $found && $mday} { return 1 }
         }
          
-        if {! $found} {
-            return 0
-        } 
+        if {! $found} { return 0 } 
     }
     
     return 0
 }
 
 
-# expand()
-#   Expand a cron time entry into lists of possible numbers
-#
-#   This function is mostly used internally by this package, but
-#   may prove useful for other things too.
+# next()
+#   return the next timestamp when cron will be valid
 #
 #   PARAMETERS
 #       a crontab time string
+#       (optional) a reference start timestamp
 #
 #   RETURNS 
-#       Success: a list of 5 number-lists { {} {} {} {} {} }
-#       Failure: an empty list {}
+#       a timestamp (clock seconds)
 #
 #**************************************
-proc ::crontime::expand {cron} {
+proc ::crontime::next {cron args} {
+    variable ranges
     
-    set atoms {}
-    set segments [regexp -inline -all -- {\S+} $cron]
-    
-    # iterate over each segment, and expand all possibilities into 
-    # a list of numbers.
-    for {set index 0} {$index < [llength $segments]} {incr index} {
-        set tmp [::crontime::_expand_cron_index [lindex $segments $index] $index]
-        lappend atoms $tmp
+    if {$args != ""} {
+        set start [lindex $args 0]
+    } else {
+        set start [clock seconds]    
     }
     
-    return $atoms    
+    set stamp $start
+    set atoms [::crontime::expand $cron]
+    set mode [::crontime::_timesearch_mode {*}$atoms]
+    set finished 0
+    set results {}
+    
+    if {$mode == 3} { set pass 2 } else { set pass 1 }
+    
+    while {! $finished} {
+        set ymd_lock 0
+        
+        # have we gone too far incrementing years?
+        if {[clock format $stamp -format "%Y"] > [expr \
+                                    [clock format $start -format "%Y"] + 1] } {
+            return {}                                
+        }
+        
+        # iterate over cron sections in a specific order
+        foreach index {3 4 2 1 0} {
+            set possibles [lindex $atoms $index]
+            set max [expr ([lindex [lindex $ranges $index] end] + 1) - \
+                                           [lindex [lindex $ranges $index] 0] ]
+            
+            # skip indexes depending on allowed range, or mode/pass values
+            if {[llength $possibles] >= $max} { continue }
+            if {$index == 4 && $mode == 0} { continue }
+            if {$index == 4 && $pass == 2} { continue }
+            if {$index == 2 && $mode == 3 && $pass == 1} { continue }
+            
+            # calculating new timestamps per segment
+            if {$index == 3} {
+                set rval [::crontime::_month_parsing 1 $stamp $possibles]
+                set stamp [lindex $rval 0]
+                if {[lindex $rval 1]} { break }
+                
+            } elseif {$index == 2} {
+                set rval [::crontime::_mday_parsing 1 $stamp $possibles]
+                set stamp [lindex $rval 0]
+                if {[lindex $rval 1]} { break }
+                
+            } elseif {$index == 1} {
+                set rval [::crontime::_hour_parsing 1 $stamp $possibles]
+                set stamp [lindex $rval 0]
+                if {[lindex $rval 1]} { break }
+                
+            } elseif {$index == 0} {
+                set rval [::crontime::_min_parsing 1 $stamp $possibles]
+                set stamp [lindex $rval 0]
+                if {[lindex $rval 1]} { break }
+                
+                set finished 1
+                
+            } else {
+                if {$ymd_lock} {
+                    set stamp [clock add $stamp 1 days]    
+                }
+                set rval [::crontime::_wday_parsing 1 $stamp $possibles]
+                set stamp [lindex $rval 0]
+                if {[lindex $rval]} { break }
+                set ymd_lock 1
+            }
+        }
+        
+        if {$finished} {
+            lappend results $stamp
+            incr pass -1
+            
+            # must re-do this whole procedure again?
+            if {$pass} {
+                set finished 0
+                set stamp $start   
+            }
+        }
+    }    
+
+    # sort the results, and pick the soonest value
+    return [lindex [lsort -integer $results] 0]
+}
+
+
+
+###  PRIVATE FUNCTIONS BELOW  #################################################
+
+
+
+# _month_parsing()
+#   Find next possible month for
+#
+#   PARAMETERS
+#       1. a seek mode (forward (1) or reverse (0))
+#       2. a starting timestamp
+#       3. list of possible values
+#
+#   RETURNS
+#       A list containing two numbers, like; {1234553454 0}
+#           1. a new timestamp
+#           2. bool indicating if entire parse block should be restarted.
+#               
+#**************************************
+proc ::crontime::_month_parsing {direction stamp args} {
+    variable formatmap
+    variable ranges
+    
+    set index 3
+    set fmt [dict get $formatmap $index]
+    set current [clock format $stamp -format $fmt]
+    set max [expr ([lindex [lindex $ranges $index] end] + 1) - \
+                                           [lindex [lindex $ranges $index] 0] ]
+
+                                                                 
+    if {$direction eq "forward" || $direction == 1} {
+        set seeking [::crontime::_next_possible $current $args]
+        
+        if {$current == $seeking} { 
+            return "$stamp 0"
+        } else {
+            if {$seeking > $current} {
+                set diff [expr $seeking - $current]
+            } else {
+                set diff [expr ($max - $current) + $seeking] 
+            }
+        
+            # increment to desired month, and then reset day info
+            set stamp [clock add $stamp $diff months]
+            set stamp [clock scan [format "%d-%d-%d 00:00:00" \
+    		                           [clock format $stamp -format "%Y"] \
+    		                           [clock format $stamp -format "%m"] \
+    		                           1 ] -format {%Y-%m-%d %H:%M:%S} ]
+    		                           
+    		if {$seeking > $current} {
+                return "$stamp 0"        
+            } else {
+                return "$stamp 1"        
+            }
+        }
+    }
+}
+
+
+# _mday_parsing()
+#   Find next possible day of month for
+#
+#   PARAMETERS
+#       1. a seek mode (forward (1) or reverse (0))
+#       2. a starting timestamp
+#       3. list of possible values
+#
+#   RETURNS
+#       A list containing two numbers, like; {1234553454 0}
+#           1. a new timestamp
+#           2. bool indicating if entire parse block should be restarted.
+#               
+#**************************************
+proc ::crontime::_mday_parsing {direction stamp args} {
+    variable formatmap
+    variable ranges
+    
+    set index 2
+    set fmt [dict get $formatmap $index]
+    set current [clock format $stamp -format $fmt]
+    set max [::crontime::_last_month_day [clock format $stamp -format "%m"] \
+                                           [clock format $stamp -format "%Y"] ]
+
+                                                                 
+    if {$direction eq "forward" || $direction == 1} {
+        set seeking [::crontime::_next_possible $current $args]
+        
+        if {$current == $seeking} { 
+            return "$stamp 0"
+        } else {
+            # is seeking mday too high for current month?
+            if {$seeking > $max} {
+                set stamp [clock add $stamp 1 months]
+                set stamp [clock scan [format "%d-%d-%d 00:00:00" \
+		                           [clock format $stamp -format "%Y"] \
+		                           [clock format $stamp -format "%m"] \
+		                           1 ] -format {%Y-%m-%d %H:%M:%S} ]
+                return "$stamp 1"
+            }
+            
+            if {$seeking > $current} {
+                set diff [expr $seeking - $current]
+            } else {
+                set diff [expr ($max - $current) + $seeking]    
+            }        
+            
+            set stamp [clock add $stamp $diff days]
+            set stamp [clock scan [format "%d-%d-%d 00:00:00" \
+		                           [clock format $stamp -format "%Y"] \
+		                           [clock format $stamp -format "%m"] \
+		                           [clock format $stamp -format "%m"] \
+		                          ] -format {%Y-%m-%d %H:%M:%S} ]
+		                          
+		    if {$seeking > $current} {
+                return "$stamp 0"
+            } else {
+                return "$stamp 1"
+            }                       
+        }
+    }
+}
+
+
+# _hour_parsing()
+#   Find next possible hour for
+#
+#   PARAMETERS
+#       1. a seek mode (forward (1) or reverse (0))
+#       2. a starting timestamp
+#       3. list of possible values
+#
+#   RETURNS
+#       A list containing two numbers, like; {1234553454 0}
+#           1. a new timestamp
+#           2. bool indicating if entire parse block should be restarted.
+#               
+#**************************************
+proc ::crontime::_hour_parsing {direction stamp args} {
+    variable formatmap
+    variable ranges
+    
+    set index 1
+    set fmt [dict get $formatmap $index]
+    set current [clock format $stamp -format $fmt]
+    set max [expr ([lindex [lindex $ranges $index] end] + 1) - \
+                                           [lindex [lindex $ranges $index] 0] ]
+
+                                                                 
+    if {$direction eq "forward" || $direction == 1} {
+        set seeking [::crontime::_next_possible $current $args]
+        
+        if {$current == $seeking} {
+            return "$stamp 0"
+        } else {
+            if {$seeking > $current} {
+                set diff [expr $seeking - $current]
+            } else {
+                set diff [expr ($max - $current) + $seeking]     
+            }
+               
+            set stamp [clock add $stamp $diff hours]
+            set stamp [clock scan [format "%d-%d-%d %d:00:00" \
+		                           [clock format $stamp -format "%Y"] \
+		                           [clock format $stamp -format "%m"] \
+		                           [clock format $stamp -format "%m"] \
+		                           [clock format $stamp -format "%H"] \
+		                          ] -format {%Y-%m-%d %H:%M:%S} ]
+		                          
+		    if {$seeking > $current} {
+    		    return "$stamp 0"
+		    } else {
+    		    return "$stamp 1"    
+		    }
+        } 
+    }
+}
+
+
+# _min_parsing()
+#   Find next possible minute for
+#
+#   PARAMETERS
+#       1. a seek mode (forward (1) or reverse (0))
+#       2. a starting timestamp
+#       3. list of possible values
+#
+#   RETURNS
+#       A list containing two numbers, like; {1234553454 0}
+#           1. a new timestamp
+#           2. bool indicating if entire parse block should be restarted.
+#               
+#**************************************
+proc ::crontime::_min_parsing {direction stamp args} {
+    variable formatmap
+    variable ranges
+    
+    set index 0
+    set fmt [dict get $formatmap $index]
+    set current [clock format $stamp -format $fmt]
+    set max [expr ([lindex [lindex $ranges $index] end] + 1) - \
+                                           [lindex [lindex $ranges $index] 0] ]
+
+                                                                
+    if {$direction eq "forward" || $direction == 1} {
+        set seeking [::crontime::_next_possible $current $args]
+        
+        if {$current == $seeking} {
+            return "$stamp 0"
+        } else {
+            if {$seeking > $current} {
+                set diff [expr $seeking - $current]
+            } else {
+                set diff [expr ($max - $current) + $seeking]     
+            }
+               
+            set stamp [clock add $stamp $diff minutes]
+            set stamp [clock scan [format "%d-%d-%d %d:%d:00" \
+		                           [clock format $stamp -format "%Y"] \
+		                           [clock format $stamp -format "%m"] \
+		                           [clock format $stamp -format "%m"] \
+		                           [clock format $stamp -format "%H"] \
+		                           [clock format $stamp -format "%M"] \
+		                          ] -format {%Y-%m-%d %H:%M:%S} ]
+		                          
+		    if {$seeking > $current} {
+    		    return "$stamp 0"
+		    } else {
+    		    return "$stamp 1"    
+		    }
+        } 
+    }
+}
+
+
+# _wday_parsing()
+#   Find next possible week day for
+#
+#   PARAMETERS
+#       1. a seek mode (forward (1) or reverse (0))
+#       2. a starting timestamp
+#       3. list of possible values
+#
+#   RETURNS
+#       A list containing two numbers, like; {1234553454 0}
+#           1. a new timestamp
+#           2. bool indicating if entire parse block should be restarted.
+#               
+#**************************************
+proc ::crontime::_wday_parsing {direction stamp args} {
+    variable formatmap
+    variable ranges
+    
+    set index 4
+    set fmt [dict get $formatmap $index]
+    set current [clock format $stamp -format $fmt]
+    set max [expr ([lindex [lindex $ranges $index] end] + 1) - \
+                                           [lindex [lindex $ranges $index] 0] ]
+    
+                  
+    if {$direction eq "forward" || $direction == 1} {
+        set seeking [::crontime::_next_possible $current $args]
+        
+        set temp [::crontime::_next_dow_time $seeking $stamp]
+        if {[clock format $temp -format "%m"] == \
+                                          [clock format $stamp -format "%m"]} {
+            return "$temp 0"
+        } else {
+            # next found day-of-week is beyond the range of the desired month. 
+            # that won't do, return the stamp and request a restart.
+            set stamp [clock add $stamp 1 months]
+            set stamp [clock scan [format "%d-%d-%d 00:00:00" \
+		                           [clock format $stamp -format "%Y"] \
+		                           [clock format $stamp -format "%m"] \
+		                           1 ] -format {%Y-%m-%d %H:%M:%S} ]    
+            
+            return "$stamp 1"
+        }
+    }
 }
 
 
@@ -261,9 +634,7 @@ proc ::crontime::_expand_cron_index {str index} {
 #**************************************
 proc ::crontime::_next_possible {num args} {
     foreach val $args {
-        if {$val >= $num} {
-            return $val
-        }    
+        if {$val >= $num} { return $val }    
     }
     
     return [lindex $args 0]
@@ -321,6 +692,72 @@ proc ::crontime::_timesearch_mode {args} {
     }
 
     return 0
+}
+
+
+# _next_dow_time()
+#
+# Return timestamp for the next occurence of the desired WDAY.
+#
+# PARAMS:
+#  1. a DOW number.
+#  2. (optional) a reference start time
+#
+# RETURNS:
+#  A timestamp
+#
+#**************************************
+proc ::crontime::_next_dow_time {num args} {
+    if {$args != ""} {
+	set stamp [lindex $args 0]
+    } else {
+	set stamp [clock seconds]
+    }
+    
+    set tries 7
+    
+    while {$tries} {
+	
+	# reset H:M:S to zeros
+	set stamp [clock scan [format "%d-%d-%d 00:00:00" \
+				[clock format $stamp -format "%Y"] \
+				[clock format $stamp -format "%m"] \
+				[clock format $stamp -format "%d"] ] -format {%Y-%m-%d %H:%M:%S}]
+	
+	if {$num == [clock format $stamp -format "%w"]} {
+	    return $stamp;
+	}
+	
+	set stamp [clock add $stamp 1 day]
+	incr tries -1
+    }
+    
+    return {}
+}
+
+
+# _last_month_day()
+#
+# Return the last day of a month in a given year. either 28,29,30, or 31
+#
+# PARAMS:
+#  1. a MON number
+#  2. a YEAR number
+#
+# RETURNS:
+#  A number
+#
+#**************************************
+proc ::crontime::_last_month_day {mon year} {
+    set day 28
+    set stamp [clock scan [format "%d-%d-%d 00:00:00" $year $mon $day ] -format {%Y-%m-%d %H:%M:%S} ]
+    
+    while {$mon == [clock format $stamp -format "%m"]} {
+	    set day [clock format $stamp -format "%d"]
+	    set stamp [clock add $stamp 1 days]
+    }
+    
+    return $day
 }
 
 
