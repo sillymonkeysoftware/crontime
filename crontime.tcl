@@ -575,6 +575,7 @@ proc ::crontime::_expand_cron_index {str index} {
             }
         }
         
+        
         # a simple, singular number?
         if {[regexp {^\d+$} $piece]} {
             lappend results $piece
@@ -613,7 +614,7 @@ proc ::crontime::_expand_cron_index {str index} {
     set max [lindex [lindex $ranges $index] end]
     set temp [dict create]
     foreach val $results {
-       dict set temp [expr $val] 1
+       dict set temp [scan $val %d] 1
     }
     
     return [lsort -integer [dict keys $temp]]
