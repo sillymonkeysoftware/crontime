@@ -19,7 +19,7 @@ set bool [crontime now "* * * * *"]
 
 set bool [crontime valid "* * * * This,Will,Fail"]
 
-set alist [crontime extract "30 08 * * *"]
+set alist [crontime expand "30 08 * * *"]
 
 set ntime [crontime next "30 08 * * Tue-Thu"]
 
